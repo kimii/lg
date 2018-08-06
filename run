@@ -1,0 +1,365 @@
+#!/bin/bash
+
+save_to(){
+db=$1
+python <(
+cat << "EOF"
+import sys
+import json
+
+try:
+  c = json.load( open(sys.argv[1]) )
+except:
+  c = {}
+  json.dump( c, open(sys.argv[1],'wb') )
+  pass
+
+try:
+  s = sys.stdin.read()
+  o = json.loads( s )
+except:
+  print s
+  exit()
+f = open(sys.argv[1],'w')
+for k,v in o.items():
+  c[k] = v
+json.dump( c, f, indent=2 )
+EOF
+) $db
+}
+
+extract(){
+python <(
+cat << "EOF"
+from bs4 import BeautifulSoup
+import subprocess
+import json
+import sys
+
+class PageParser():
+  def __init__(self):
+    self._form = {}
+    self._select = {}
+    self._input = {}
+    self._submit = []
+  def __call__(self, url):
+    self._url = url
+    f = self._url.split('://',1); self._scheme = f[0]
+    agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36"
+    h = subprocess.Popen( 'curl -s --user-agent "%s" %s' % (agent, self._url), shell=True , stdout=subprocess.PIPE ).stdout
+    self._sp = BeautifulSoup( h, 'lxml' )
+    forms = self._sp.find_all('form')
+    if forms:
+      self._parse_form(forms[0])
+      return
+    
+    # change scheme
+    f = self._url.split('://',1); f[0] = 'https' if f[0] == 'http' else 'http'; self._url = '://'.join(f)
+    self._scheme = f[0]
+    h = subprocess.Popen( 'curl -s --user-agent "%s" %s' % (agent, self._url), shell=True , stdout=subprocess.PIPE ).stdout
+    self._sp = BeautifulSoup( h, 'lxml' )
+    forms = self._sp.find_all('form')
+    if forms:
+      self._parse_form(forms[0])
+      return
+    
+    # render js
+    h = subprocess.Popen('phantomjs-2.1.1-linux-x86_64/bin/phantomjs render.js %s' % (self._url), shell=True, stdout=subprocess.PIPE).stdout;
+    self._sp = BeautifulSoup( h, 'lxml' )
+    forms = self._sp.find_all('form')
+    if forms:
+      self._parse_form(forms[0])
+      return
+
+  def _parse_submit(self, i):
+    ID = i['id'] if i.has_attr('id') else None
+    name = i['name'] if i.has_attr('name') else None
+    self._submit.append( {'name': name, 'id': ID} )
+
+  def _get_text(self, i):
+    text = i.next_sibling.strip('\n|\t| ')
+    if not text:
+      label = i.find_next_sibling('label')
+      text = label.get_text().strip('\n|\t| ') if label else ''
+    return text
+
+  def _parse_form(self, form):
+    # form
+    for t in ['method','action','enctype']:
+      if form.has_attr( t ):
+        self._form[t] = form[t]
+
+    # input
+    for i in form.find_all('input'):
+      if not i.has_attr( 'name' ):
+        continue
+      name = i['name']
+      tp = i['type'] if i.has_attr( 'type' ) else 'text'
+      if tp == 'text':
+        self._input[name] = { 'type': tp, 'data': None }
+      elif tp in ['radio','checkbox']:
+        if not i.has_attr('value'):
+          continue
+        value = i['value']
+        if self._input.has_key(name):
+          self._input[name]['data'].append({'value': value, 'text': self._get_text(i)})
+        else:
+          self._input[name] = { 'type': tp, 'data': [{'value': value, 'text': self._get_text(i)}] }
+
+      elif tp == 'submit':
+        self._parse_submit(i)
+      elif tp == 'hidden':
+        value = i['value']
+        self._input[name] = { 'type': tp, 'data': {'value': value} }
+
+    ## single checkbox
+    for k,v in self._input.items():
+      if (v['type'] == 'checkbox') and (len(v['data']) == 1):
+        self._input[k] = { 'type': 'checkbox', 'data': v['data'][0] }
+  
+    ## button as submit
+    for i in form.find_all('button'):
+        self._parse_submit(i)
+
+    # select
+    for s in form.find_all('select'):
+      if not s.has_attr( 'name' ):
+        continue
+      name = s['name']
+      t = []
+      for o in s.find_all('option'):
+        t.append({'value': o['value'], 'text': o.get_text()})
+      self._select[name] = t
+
+
+    # output
+    print json.dumps( {
+      'url': self._url,
+      'scheme': self._scheme,
+      'form': self._form,
+      'input': self._input,
+      'select': self._select,
+      'submit': self._submit,
+    }, indent=2 )
+
+if __name__ == '__main__':
+  url = raw_input().strip()
+  parser = PageParser()
+  parser(url)
+EOF
+)
+}
+
+analyze(){
+python <(
+cat << "EOF"
+import json
+import sys
+import re
+
+agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36"
+dst = '202.118.224.100'
+target_patterns = ['^host$','^target$','^arg$','^query$','^parameter$']
+node_patterns = ['^node$','^router$','^routers$','^action$']
+cmd_patterns = ['^cmd$','^command$','^query$','^server$']
+
+url = raw_input()
+
+try:
+  o = json.loads(sys.stdin.read())
+except:
+  print 'error'
+  exit()
+
+# has method?
+if not o['form'].has_key('method'):
+  print 'no method'
+  exit()
+method = o['form']['method']
+
+# change scheme
+f = url.split('://',1);
+addr = f[1]; base = addr.split('/',1)[0]
+scheme = o['scheme'];
+
+# action
+action = o['form']['action'] if o['form'].has_key('action') else ''
+
+if action: 
+  if action[0] == '/':
+    url = scheme + '://' + base + action
+  elif len( action.split('://') ) == 2:
+    url = action
+  else:
+    url = scheme + '://' + addr.strip('/') + '/' + action
+else:
+  url = scheme + '://' + addr
+
+## guess target
+text = filter( lambda k: o['input'][k]['type']=='text', o['input'].keys() )
+target = ''
+if not text:
+  print 'no text'
+  exit()
+if len(text) == 1:
+  target = text[0]
+else:
+  g = filter( lambda k: any( map(lambda p: re.match(re.compile(p), k), target_patterns) ), text )
+  target = g[0] if g else ''
+
+input = {}; select = o['select']
+select = { k: {'type': 'select', 'data': select[k]} for k in select.keys() }
+## input as select
+for k,v in o['input'].items():
+  if type(v['data']) == type([]):
+    select[k] = { 'type': v['type'], 'data': v['data'] }
+  elif k != target:
+    input[k] = v
+
+## select
+nodes = {}; cmd = {}; options = {}
+for k,v in select.items():
+  if any( map(lambda p: re.match(p, k), node_patterns) ):
+    nodes = {k: v}
+  elif any( map(lambda p: re.match(p, k), cmd_patterns) ):
+    cmd = {k: v}
+  elif v['type'] == 'select':
+    options[k] = v
+  else:
+    options[k] = v
+
+cfg = {
+  'index': o['url'],
+  'method': method,
+  'url': url,
+  'target': target,
+  'nodes': nodes,
+  'cmd': cmd,
+  'options': options,
+  'input': input,
+  'format': ''
+}
+
+print json.dumps({base: cfg}, indent=2)
+EOF
+)
+}
+
+request(){
+db=$1
+python <(
+cat << "EOF"
+import sys
+import json
+import urllib
+agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36"
+target = "202.118.224.100"
+
+c = json.load( open(sys.argv[1]) )
+site = raw_input().strip()
+
+if not c.has_key(site):
+  exit()
+c = c[site]
+
+data = {}
+
+data[ c['target'] ] = target
+
+nodes = c['nodes']
+for k,v in nodes.items():
+  data[ k ] = v['data'][0]['value']
+
+cmd = c['cmd']
+for k,v in cmd.items():
+  data[ k ] = v['data'][0]['value']
+
+options = c['options']
+for k,v in options.items():
+  data[ k ] = v['data'][0]['value']
+
+input = c['input']
+for k,v in input.items():
+  data[ k ] = v['data']['value']
+
+data = urllib.urlencode( data )
+
+if c['method'].lower() == 'get':
+  print "curl -s -X %s --user-agent '%s' '%s?%s'" % (c['method'].upper(), agent, c['url'], data)
+elif c['method'].lower() == 'post':
+  print "curl -s -X %s --user-agent '%s' --data '%s' '%s'" % (c['method'].upper(), agent, data, c['url'])
+
+EOF
+) $db
+}
+
+format(){
+  tp=$1
+
+  case $tp in
+    "pre")
+      perl -MHTML::TreeBuilder -e '$r=HTML::TreeBuilder->new_from_content(<STDIN>); foreach my $l ($r->look_down("","pre")) {print $l->as_text,"\n"}' | sed '/^$/d' | sed '/^ *$/d'
+      ;;
+    "*")
+      ;;
+  esac
+}
+
+usage(){
+  echo './run <$cmd> [$options]'
+  echo 'Examples:'
+  echo '  ./run parse <$url>'
+  echo '  ./run request <$site>'
+  echo '  ./run simulate <$site> # try this if direct request does not work'
+  echo '  ./run format <$output_type>'
+}
+
+lgdata='lgdata/'
+
+# main
+test $# -lt 1 && usage && exit
+cmd=$1
+case $cmd in
+  "parse") # analyze webpage and get looking-glass api
+    test $# -lt 2 && usage && exit
+    url=$2
+    date=$(date +%Y%m%d-%H:%M:%S)
+
+    # extract info from website
+    mkdir -p $lgdata; fn=$lgdata'/'$(echo $url | sed 's/\//#/g')
+    echo $url | extract | tee $fn
+
+    # analyze info
+    cat <(echo $url) $fn | analyze | save_to db.json
+    ;;
+  "request")
+    test $# -lt 2 && usage && exit
+    site=$2;
+
+    echo $site | request db.json
+    ;;
+  "simulate")
+    test $# -lt 2 && usage && exit
+    site=$2;
+
+    casperjs simulate.js $site
+    ;;
+  "format")
+    test $# -lt 2 && usage && exit
+
+    tp=$2;
+    format $tp
+    ;;
+
+  ## helper commands
+  "list")
+    cat db.json | python -c "import json; import sys; o = json.load(sys.stdin); print '\n'.join( o.keys() )"
+    ;;
+  "test")
+    test $# -lt 2 && usage && exit
+    ;;
+  "*")
+    usage
+    exit
+    ;;
+esac
