@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# sub
+update(){
+db=$1
+python <(
+cat << "EOF"
+import sys
+import json
+
+try:
+  c = json.load( open(sys.argv[1]) )
+except:
+  c = {}
+  json.dump( c, open(sys.argv[1],'wb') )
+  exit()
+
+key = raw_input()
+try:
+  s = sys.stdin.read()
+  o = json.loads( s )
+except:
+  sys.stderr.write( s + '\n' )
+  exit()
+f = open(sys.argv[1],'w')
+c[key] = o
+json.dump( c, f, indent=2 )
+EOF
+) $db $key
+}
+
+delete(){
+db=$1
+key=$2
+python <(
+cat << "EOF"
+import sys
+import json
+
+try:
+  c = json.load( open(sys.argv[1]) )
+except:
+  exit()
+
+key = sys.argv[2]
+if not c.has_key(key):
+  exit()
+
+o = { k: c[k] for k in filter( lambda x: x!=key, c.keys() ) }
+f = open(sys.argv[1],'w')
+json.dump( o, f, indent=2 )
+EOF
+) $db $key
+}
+
+usage(){
+  echo './db [-i <$file>] <$command> [$args]' >&2
+  echo './db list # list keys' >&2
+  echo './db get <$key>' >&2
+  echo './db update <$key> # reads content from stdin' >&2
+  echo './db delete <$key>' >&2
+}
+
+# main
+test $# -lt 1 && usage && exit
+
+OPTIND=1
+while getopts "i:" opt; do
+  case "$opt" in
+    i)
+      FILE=$OPTARG
+      ;;
+    *)
+      usage
+      exit -1
+      ;;
+  esac
+done
+shift $((OPTIND-1))
+
+db=$(test ! -z "$FILE" && echo $FILE || echo "db.json")
+cmd=$1
+
+case $cmd in
+  "list" | "l" )
+    cat $(test ! -z "$db" && echo $db || echo "db.json") | \
+      python -c "import json; import sys; o = json.load(sys.stdin); print '\n'.join( o.keys() )"
+    ;;
+  "get" | "r" )
+    test $# -lt 2 && usage && exit
+    key=$2
+    cat $db | python -c "import json; import sys; o = json.load(sys.stdin); site = sys.argv[1]; print (json.dumps({site: o[site]}, indent=2) if o.has_key(site) else '')" $key
+    ;;
+  "update" | "u" )
+    update $db
+    ;;
+    "delete" | "d" )
+    test $# -lt 2 && usage && exit
+    key=$2
+    delete $db $key
+    ;;
+  "*")
+    usage
+    exit
+    ;;
+esac
