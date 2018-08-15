@@ -1,8 +1,9 @@
 var casper = require('casper').create(),
     system = require('system'),
+    utils = require('utils'),
     fs = require('fs');
 
-var ip = '8.8.8.8';
+var ip = '202.118.224.100';
 
 function d2l(d){
   return Object.keys(d).map( function(k){
@@ -15,7 +16,6 @@ function fill(data, tuples){
     if (Array.isArray(t[1].data)){
       data[ t[0] ] = t[1].data[0].value;
     }else{
-      console.log( t[1].type );
       if( t[1].type == 'checkbox' || t[1].type == 'radio' ){
         data[ t[0] ] = t[1].data.value;
       }
@@ -34,7 +34,7 @@ if (system.args[system.args.length-1] == "simulate.js") {
   site = db[site];
   if (!site) casper.exit();
 
-  var url = site.url;
+  var url = site.index;
 
   var data = {};
   data[site.target] = ip;
@@ -48,14 +48,24 @@ if (system.args[system.args.length-1] == "simulate.js") {
   });
 
   console.log(JSON.stringify(data));
+  /*
+  casper.on('resource.received', function(responseData){
+    console.log( JSON.stringify(responseData) );
+  });
+  */
   // start simulation
   casper.start(url, function() {
     this.waitForSelector('form');
   });
 
   casper.then(function(){
-    this.fill('form', data, true);
+    this.fill('form', data, false);
+    casper.click('button[type=submit]');
   });
+
+  casper.waitForResource(function(resource) {
+    return resource.url.indexOf(ip) != -1 && resource.stage == 'end';
+  }, null, null, 60*1000);
 
   casper.then(function(){
     var h = this.evaluate(function(){
