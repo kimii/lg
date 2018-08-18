@@ -31,15 +31,17 @@ class PageParser():
 
       # follow frame
       sys.stderr.write('following frames' + '\n')
-      frames = self._sp.find_all('frame');
-      for frame in frames:
-        if not frame.has_attr('src'):
-          continue
-        link = self._get_link_url(url, frame['src'])
-        parsed = self.__call__(link, change_scheme=False)
-        if parsed:
-          parsed['index'] = url
-          return parsed
+      tags = [ 'frame', 'iframe' ]
+      for tag in tags:
+        tl = self._sp.find_all(tag);
+        for t in tl:
+          if not t.has_attr('src'):
+            continue
+          link = self._get_link_url(url, t['src'])
+          parsed = self.__call__(link, change_scheme=False)
+          if parsed:
+            parsed['index'] = url
+            return parsed
     
     # render js
     sys.stderr.write('rendering js' + '\n')
@@ -60,12 +62,13 @@ class PageParser():
   def _parse_forms(self, forms):
     pl = map(self._parse_form, forms)
     for p in pl:
+      print p
       # check input type
       input = p['input']
       if not input:
         continue
       for k,v in input.items():
-        if v['type'] in ['radio','checkbox']:
+        if v['type'] in ['radio','checkbox','select']:
           return p
     # default
     return pl[0]
@@ -97,6 +100,7 @@ class PageParser():
     return url
 
   def _parse_form(self, form):
+    self.__init__()
     # form
     for t in ['method','action','enctype','name','id']:
       if form.has_attr( t ):
@@ -148,6 +152,12 @@ class PageParser():
 
 
     # parsed result
+    print {
+      'form': self._form,
+      'input': self._input,
+      'select': self._select,
+      'submit': self._submit,
+    }
     return {
       'form': self._form,
       'input': self._input,
@@ -230,7 +240,7 @@ if len(text) == 1:
   target = text[0]
 else:
   g = filter( lambda k: any( map(lambda p: re.match(re.compile(p), k), target_patterns) ), text )
-  target = g[0] if g else ''
+  target = g[0] if g else text[1] # todo
 
 input = {}; select = o['select']
 select = { k: {'type': 'select', 'data': select[k]} for k in select.keys() }
@@ -383,7 +393,7 @@ case $cmd in
     echo $url | extract | ( test ! -z "$VERBOSE" && tee $fn >&2 || cat >$fn )
 
     # analyze info
-    cat $fn | analyze
+    cat $fn | analyze | tee $fn.db
     ;;
   "request")
     test $# -lt 2 && usage && exit
